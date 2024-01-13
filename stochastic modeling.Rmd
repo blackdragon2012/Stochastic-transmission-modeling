@@ -1,0 +1,1095 @@
+---
+title: "Hagelloch Measles Data"
+author: "Akshay Bhandari"
+date: "2023-07-05"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Import the libraries
+```{r}
+library(ggplot2)
+library(ggfortify)
+library(factoextra)
+library(magrittr)
+library(dplyr)
+library(ggpubr)
+library(ICSNP)
+library(MASS)
+library(vcvComp)
+library(factoextra)
+library(tidyverse)
+library(knitr)
+library(RColorBrewer)
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(RColorBrewer)
+```
+
+
+Import the data file
+```{r}
+#importing the raw data file
+measles_raw <- read.table("hagellochfull.txt", header = TRUE)
+
+#storing the column names
+colnames(measles_raw) <- c("PN", "NAME", "FN", "HN", "AGE", "SEX", "PRO", "ERU", "CL", "DEAD", "IFTO", "SI", "C", "PR", "CA", "NI", "GE", "TD", "TM", "HNX", "HNY")
+```
+
+Setting up the data set
+```{r}
+#creating a subset data set with all the useful columns
+measles <- subset(measles_raw, select = c(PN, NAME, AGE, SEX, HN, PRO, ERU, DEAD, IFTO, PR, CL))
+
+#temp dates
+measles$PRO_new <- paste0(floor(measles$PRO), ".", round((measles$PRO - floor(measles$PRO)), 2) * 100)
+measles$ERU_new <- paste0(floor(measles$ERU), ".", round((measles$ERU - floor(measles$ERU)), 2) * 100)
+measles$DEAD_new <- paste0(floor(measles$DEAD), ".", round((measles$DEAD - floor(measles$DEAD)), 2) * 100)
+
+#dividing PRO date into month and date, for conversion
+pro_parts_PRO <- strsplit(measles$PRO_new, "\\.")
+measles$PRO_month <- as.integer(sapply(pro_parts_PRO, function(x) as.integer(x[1])))
+measles$PRO_date <- as.integer(sapply(pro_parts_PRO, function(x) as.integer(x[2])))
+
+#dividing ERU date into month and date, for conversion
+pro_parts_ERU <- strsplit(measles$ERU_new, "\\.")
+measles$ERU_month <- as.integer(sapply(pro_parts_ERU, function(x) as.integer(x[1])))
+measles$ERU_date <- as.integer(sapply(pro_parts_ERU, function(x) as.integer(x[2])))
+
+#dividing DEAD date into month and date, for conversion
+pro_parts_DEAD <- strsplit(measles$DEAD_new, "\\.")
+measles$DEAD_month <- as.integer(sapply(pro_parts_DEAD, function(x) as.integer(x[1])))
+measles$DEAD_date <- as.integer(sapply(pro_parts_DEAD, function(x) as.integer(x[2])))
+
+#Removing the additional columns
+measles <- subset(measles, select = -c(PRO_new, ERU_new, DEAD_new, PRO, ERU, DEAD))
+
+#storing the reference date
+ref_date <- as.Date("1861-10-29")
+
+#storing the PRO date, to work with (and dealing with the year change row)
+measles$PRO_date <- sprintf("%02d", measles$PRO_date)
+measles$PRO <- as.Date(paste("1861", measles$PRO_month, measles$PRO_date, sep = "-"))
+year_change_index <- which(measles$PRO < ref_date)
+measles$PRO[year_change_index] <- measles$PRO[year_change_index] + 365
+
+#storing the ERU date, to work with (and dealing with the year change row)
+measles$ERU_date <- sprintf("%02d", measles$ERU_date)
+measles$ERU <- as.Date(paste("1861", measles$ERU_month, measles$ERU_date, sep = "-"))
+year_change_index <- which(measles$ERU < ref_date)
+measles$ERU[year_change_index] <- measles$ERU[year_change_index] + 365
+
+#storing the DEAD date, to work with (and dealing with the year change row)
+measles$DEAD <- as.Date(NA)
+non_zero_index <- which(measles$DEAD_month != 0 | measles$DEAD_date != 0)
+measles$DEAD_date[non_zero_index] <- sprintf("%02d", measles$DEAD_date[non_zero_index])
+measles$DEAD_month[non_zero_index] <- sprintf("%02d", measles$DEAD_month[non_zero_index])
+measles$DEAD[non_zero_index] <- as.Date(paste("1861", measles$DEAD_month[non_zero_index], measles$DEAD_date[non_zero_index], sep = "-"))
+year_change_index <- which(measles$DEAD[non_zero_index] < ref_date)
+measles$DEAD[year_change_index] <- measles$DEAD[year_change_index] + 365
+
+#removing additional columns
+measles <- subset(measles, select = -c(PRO_date, PRO_month, ERU_date, ERU_month, DEAD_date, DEAD_month))
+
+#setting d=3 for the baseline model
+d <- 3 
+
+#storing the recover date as ERU + 3
+measles$RECOVER <- measles$ERU + d
+
+#storing the date which is lower, either dead or recover
+measles$RECOVER <- fifelse(!is.na(measles$DEAD) & measles$DEAD < measles$RECOVER, measles$DEAD, measles$RECOVER)
+
+#outlier (mentioned in the report)
+measles <- measles[-141, ] #outlier
+
+```
+
+```{r}
+#histogram of prodromes days
+hist(measles$PR, main = "Histogram of prodromes in days", xlab = "Days", ylab = "Frequency", col = "lightblue", border = "black", breaks = 20)
+
+unique_values_pr <- measles$PR
+```
+
+
+SEIR data set for baseline model
+```{r}
+#setting the start day as the min PRO day-2 (1 day before the outbreak began)
+starting_date <- min(measles$PRO) - 2
+
+#last day of epidemic (when all individuals have been recovered)
+end_date <- max(measles$RECOVER)
+
+#adding a status check parameter, 1 for yes, 0 for no
+measles$S <- as.integer(1)
+measles$E <- as.integer(0)
+measles$I <- as.integer(0)
+measles$R <- as.integer(0)
+
+#creating the SEIR data set
+SEIR <- data.frame(day = integer(), S = integer(), E = integer(), I = integer(), R = integer(), stringsAsFactors = FALSE)
+
+#setting the initial numbers (known to us)
+S <- as.integer(187)
+E <- as.integer(0)
+I <- as.integer(0)
+R <- as.integer(0)
+day <- as.integer(0)
+
+current_date <- starting_date
+
+for( x in 0:(end_date - starting_date)){
+  
+  day <- x
+  
+  for( y in 1:nrow(measles) ){
+    
+    #changing the status from Susceptible to Exposed (E=9)
+    if((current_date) >= (measles$PRO[y]-10) && current_date < (measles$PRO[y]-1) && (measles$S[y] == 1) && (measles$E[y] == 0)){
+      S <- S - 1
+      E <- E + 1
+      measles$E[y] <- 1
+      measles$S[y] <- 0
+    }
+    
+    #changing the status from Susceptible to Infected (useful for the initial days when some are already exposed)
+    else if((current_date) >= (measles$PRO[y]-1) && current_date < (measles$RECOVER[y]) && (measles$I[y] == 0) && (measles$S[y] == 1)){
+      S <- S - 1
+      I <- I + 1
+      measles$I[y] <- 1
+      measles$S[y] <- 0
+    }
+    
+    #changing the status from Exposed to Infected
+    else if((current_date) >= (measles$PRO[y]-1) && current_date < (measles$RECOVER[y]) && (measles$I[y] == 0) && (measles$E[y] == 1)){
+      E <- E - 1
+      I <- I + 1
+      measles$I[y] <- 1
+      measles$E[y] <- 0
+    }
+    
+    #changing the status from Infected to Recovered
+    else if( current_date >= (measles$RECOVER[y]) && (measles$R[y] == 0) && (measles$I[y] == 1) ){
+      I <- I - 1
+      R <- R + 1
+      measles$R[y] <- 1
+      measles$I[y] <- 0
+    }
+    
+  }
+  
+  new_row <- data.frame(day = day, S = S, E = E, I = I, R = R)
+  SEIR <- rbind(SEIR, new_row)
+  
+  day <- day + 1
+  current_date <- current_date + 1
+  
+}
+
+measles <- subset(measles, select = -c(S, E, I, R))
+
+print(SEIR)
+
+```
+
+#SEIR_TOTAL plot
+```{r}
+SEIR %>%
+  ggplot(aes(x = day, y = I)) +
+  geom_line(aes(col = "Infected"), show.legend = TRUE) +
+  geom_point(aes(col = "Infected")) +
+  geom_line(aes(y = E, col = "Exposed"), show.legend = TRUE) +
+  geom_point(aes(y = E, col = "Exposed")) +    
+  geom_line(aes(y = S, col = "Susceptible"), show.legend = TRUE) +
+  geom_point(aes(y = S, col = "Susceptible")) +                 
+  geom_line(aes(y = R, col = "Recovered"), show.legend = TRUE) +
+  geom_point(aes(y = R, col = "Recovered")) +
+  theme_bw() +
+  labs(x = "Day of recording(start: 20th October 1861)", y = "Number of children") +
+  scale_color_manual(values = c("orange", "red", "purple", "green"),
+                     labels = c("Exposed", "Infected","Susceptible", "Recovered"),
+                     name = "Category")
+
+```
+
+SEIR Susceptible plot
+```{r}
+SEIR %>%
+  ggplot(aes(x = day, y = S)) +
+  geom_line(aes(col = "Susceptible"), show.legend = TRUE) +
+  geom_point(aes(col = "Susceptible"))+
+  theme_bw() +
+  labs(x = "Time after initial day", y = "Number of Susceptible children") +
+  scale_color_manual(values = c("purple"),
+                     labels = c("Susceptible"),
+                     name = "Category")
+```
+
+SEIR Infected plot
+```{r}
+SEIR %>%
+  ggplot(aes(x = day, y = I)) +
+  geom_line(aes(col = "Infected"), show.legend = TRUE) +
+  geom_point(aes(col = "Infected"))+
+  theme_bw() +
+  labs(x = "Time after initial day", y = "Number of Infected children") +
+  scale_color_manual(values = c("red"),
+                     labels = c("Infected"),
+                     name = "Category")
+```
+
+SEIR Exposed plot
+```{r}
+SEIR %>%
+  ggplot(aes(x = day, y = E)) +
+  geom_line(aes(col = "Exposed"), show.legend = TRUE) +
+  geom_point(aes(col = "Exposed"))+
+  theme_bw() +
+  labs(x = "Time after initial day", y = "Number of Exposed children") +
+  scale_color_manual(values = c("orange"),
+                     labels = c("Exposed"),
+                     name = "Category")
+```
+
+
+SEIR classwise data set
+```{r}
+#setting the start day as the min PRO day-2 (1 day before the outbreak began)
+starting_date <- min(measles$PRO) - 2
+end_date <- max(measles$RECOVER)
+
+measles$S <- as.integer(1)
+measles$E <- as.integer(0)
+measles$I <- as.integer(0)
+measles$R <- as.integer(0)
+
+SEIR_classwise <- data.frame(day = integer(), S0 = integer(), S1 = integer(), S2 = integer(), E0 = integer(), E1 = integer(), E2 = integer(), I0 = integer(), I1 = integer(), I2 = integer(), R0 = integer(), R1 = integer(), R2 = integer(), stringsAsFactors = FALSE)
+
+#adding a status check parameter, 1 for yes, 0 for no
+S0 <- as.integer(89)
+S1 <- as.integer(30)
+S2 <- as.integer(68)
+E0 <- as.integer(0)
+E1 <- as.integer(0)
+E2 <- as.integer(0)
+I0 <- as.integer(0)
+I1 <- as.integer(0)
+I2 <- as.integer(0)
+R0 <- as.integer(0)
+R1 <- as.integer(0)
+R2 <- as.integer(0)
+day <- as.integer(0)
+
+
+current_date <- starting_date
+
+for( x in 0:(end_date - starting_date)){
+  
+  day <- x
+  
+  for( y in 1:nrow(measles) ){
+    
+    if((current_date) >= (measles$PRO[y]-10) && current_date < (measles$PRO[y]-1) && (measles$S[y] == 1) && (measles$E[y] == 0)){
+      
+      #changing the status from Susceptible to Exposed for CL0
+      if(measles$CL[y] == 0){
+        S0 <- S0 - 1
+        E0 <- E0 + 1
+        measles$E[y] <- 1
+        measles$S[y] <- 0
+      }
+      #changing the status from Susceptible to Exposed for CL1
+      else if(measles$CL[y] == 1){
+        S1 <- S1 - 1
+        E1 <- E1 + 1
+        measles$E[y] <- 1
+        measles$S[y] <- 0
+      }
+      #changing the status from Susceptible to Exposed for CL2
+      else if(measles$CL[y] == 2){
+        S2 <- S2 - 1
+        E2 <- E2 + 1
+        measles$E[y] <- 1
+        measles$S[y] <- 0
+      }
+    }
+    
+    else if((current_date) >= (measles$PRO[y]-1) && current_date < (measles$RECOVER[y]) && (measles$I[y] == 0) && (measles$S[y] == 1)){
+      
+      #changing the status from Susceptible to Infected for CL0 (useful for the initial days when some are already exposed)
+      if(measles$CL[y] == 0){
+        S0 <- S0 - 1
+        I0 <- I0 + 1
+        measles$I[y] <- 1
+        measles$S[y] <- 0
+      }
+      #changing the status from Susceptible to Infected for CL1 (useful for the initial days when some are already exposed)
+      else if(measles$CL[y] == 1){
+        S1 <- S1 - 1
+        I1 <- I1 + 1
+        measles$I[y] <- 1
+        measles$S[y] <- 0
+      }
+      #changing the status from Susceptible to Infected for CL2 (useful for the initial days when some are already exposed)
+      else if(measles$CL[y] == 2){
+        S2 <- S2 - 1
+        I2 <- I2 + 1
+        measles$I[y] <- 1
+        measles$S[y] <- 0
+      }
+    }
+    
+    else if((current_date) >= (measles$PRO[y]-1) && current_date < (measles$RECOVER[y]) && (measles$I[y] == 0) && (measles$E[y] == 1)){
+     
+      #changing the status from Exposed to Infected for CL0
+      if(measles$CL[y] == 0){
+        E0 <- E0 - 1
+        I0 <- I0 + 1
+        measles$I[y] <- 1
+        measles$E[y] <- 0
+      }
+      #changing the status from Exposed to Infected for CL1
+      else if(measles$CL[y] == 1){
+        E1 <- E1 - 1
+        I1 <- I1 + 1
+        measles$I[y] <- 1
+        measles$E[y] <- 0
+      }
+      #changing the status from Exposed to Infected for CL2
+      else if(measles$CL[y] == 2){
+        E2 <- E2 - 1
+        I2 <- I2 + 1
+        measles$I[y] <- 1
+        measles$E[y] <- 0
+      }
+    }
+    
+    #changing the status from Infected to Recovered for CL0
+    else if( current_date >= (measles$RECOVER[y]) && (measles$R[y] == 0) && (measles$I[y] == 1) ){
+      if(measles$CL[y] == 0){
+        I0 <- I0 - 1
+        R0 <- R0 + 1
+        measles$R[y] <- 1
+        measles$I[y] <- 0
+      }
+      #changing the status from Infected to Recovered for CL1
+      else if(measles$CL[y] == 1){
+        I1 <- I1 - 1
+        R1 <- R1 + 1
+        measles$R[y] <- 1
+        measles$I[y] <- 0
+      }
+      #changing the status from Infected to Recovered for CL2
+      else if(measles$CL[y] == 2){
+        I2 <- I2 - 1
+        R2 <- R2 + 1
+        measles$R[y] <- 1
+        measles$I[y] <- 0
+      }
+    }
+   
+  }
+  
+  new_row <- data.frame(day = day, S0 = S0, S1 = S1, S2 = S2, E0 = E0, E1 = E1, E2 = E2, I0 = I0, I1 = I1, I2 = I2, R0 = R0, R1 = R1, R2 = R2)
+  SEIR_classwise <- rbind(SEIR_classwise, new_row)
+  
+  day <- day + 1
+  current_date <- current_date + 1
+  
+}
+
+measles <- subset(measles, select = -c(S, E, I, R))
+
+print(SEIR_classwise)
+
+```
+
+#PLOT of CLASSWISE SUSCEPTIBLE
+```{r}
+ggplot() +
+  geom_line(data = SEIR_classwise, aes(x = day, y = S0, col = "Preschool")) +
+  geom_point(data = SEIR_classwise, aes(x = day, y = S0, col = "Preschool")) +
+  geom_line(data = SEIR_classwise, aes(x = day, y = S1, col = "CL=1")) +
+  geom_point(data = SEIR_classwise, aes(x = day, y = S1, col = "CL=1")) +
+  geom_line(data = SEIR_classwise, aes(x = day, y = S2, col = "CL=2")) +
+  geom_point(data = SEIR_classwise, aes(x = day, y = S2, col = "CL=2")) +
+  scale_color_manual(values = c("Preschool" = "red", "CL=1" = "green", "CL=2" = "purple"), name = "Class") +
+  theme_bw() +
+  labs(x = "Time after initial day", y = "Number of Susceptible children")
+```
+
+#PLOT of CLASSWISE INFECTED
+```{r}
+ggplot() +
+  geom_line(data = SEIR_classwise, aes(x = day, y = I0, col = "Preschool")) +
+  geom_point(data = SEIR_classwise, aes(x = day, y = I0, col = "Preschool")) +
+  geom_line(data = SEIR_classwise, aes(x = day, y = I1, col = "CL=1")) +
+  geom_point(data = SEIR_classwise, aes(x = day, y = I1, col = "CL=1")) +
+  geom_line(data = SEIR_classwise, aes(x = day, y = I2, col = "CL=2")) +
+  geom_point(data = SEIR_classwise, aes(x = day, y = I2, col = "CL=2")) +
+  scale_color_manual(values = c("Preschool" = "red", "CL=1" = "green", "CL=2" = "purple"), name = "Class") +
+  theme_bw() +
+  labs(x = "Time after initial day", y = "Number of Infected children")
+```
+
+#likelihood for TOTAL MODEL
+```{r}
+log_likelihood_function <- function(q, data) {
+  n <- nrow(data)
+  log_likelihood <- numeric(n)
+  
+  for (x in 1:n) {
+    prev_I <- lag(data$I)[x]
+    prev_S <- lag(data$S)[x]
+    delta_S <- prev_S - data$S[x]
+    
+    if (is.na(prev_I) || prev_I == 0) {
+      log_likelihood[x] <- 0
+    } else {
+      #calculating the log likelihood
+      log_likelihood[x] <- (data$S[x] * prev_I) * log(q) + (delta_S) * log(1 - (q ^ prev_I))
+    }
+  }
+  
+  total_log_likelihood <- sum(log_likelihood)
+  #returning the max negative likelihood
+  return(-total_log_likelihood) 
+}
+
+```
+
+```{r}
+#initial conditions
+init_q <- 0.1
+
+#optimising for maximising
+result <- optim(par = init_q, fn = log_likelihood_function,  data = SEIR)
+
+q_final <- result$par
+```
+
+value of q for the baseline model
+```{r}
+paste("Total:", q_final)
+```
+
+
+Simulation of results for baseline model
+```{r}
+set.seed(123)
+simulation_results <- list()
+
+for (simulation_index in 1:1000) {
+
+  
+temp_pr <- unique_values_pr
+
+SEIR_simulated <- data.frame(CN = integer(), S = integer(), E = integer(), I = integer(), R = integer(), day_E = integer(), day_I = integer(), day_R = integer(), stringsAsFactors = FALSE)
+
+for (CN in 1:187) {
+
+  S <- ifelse(CN == 1, 0, 1)
+  E <- ifelse(CN == 1, 0, 0)
+  I <- ifelse(CN == 1, 1, 0)
+  R <- 0
+  day_E <- ifelse(CN == 1, 0, 0)
+  day_I <- ifelse(CN == 1, 1, 0)
+  day_R <- ifelse(CN == 1, 8, 0)
+  
+
+  new_row <- data.frame(CN, S, E, I, R, day_E, day_I, day_R)
+  SEIR_simulated <- rbind(SEIR_simulated, new_row)
+}
+
+current_day <- 2
+current_S <- sum(SEIR_simulated$S)
+current_R <- sum(SEIR_simulated$R)
+
+while (current_R != 187) {
+  
+  for(i in 1:187){
+    
+    if(current_day >= SEIR_simulated$day_I[i] && current_day < SEIR_simulated$day_R[i] && SEIR_simulated$E[i] == 1){
+      SEIR_simulated$E[i] = 0
+      SEIR_simulated$I[i] = 1
+    }
+    
+    else if(current_day >= SEIR_simulated$day_R[i] && SEIR_simulated$I[i] == 1){
+      SEIR_simulated$I[i] = 0
+      SEIR_simulated$R[i] = 1
+    }
+  }
+  
+  prev_I <- sum(SEIR_simulated$I)
+  prev_S <- sum(SEIR_simulated$S)
+  
+  #simulating random binomial variable for the current day
+  new_E <- rbinom(1, prev_S, (1-q_final^prev_I))
+  temp_E <- new_E
+  
+  n <- 1
+  
+  while(temp_E > 0 ){
+    if(SEIR_simulated$S[n] == 1){
+      
+        random_index <- sample(length(temp_pr), size = 1)
+        random_value <- temp_pr[random_index]
+        temp_pr <- temp_pr[-random_index]
+        
+        d <- 3
+        
+        SEIR_simulated$S[n] = 0
+        SEIR_simulated$E[n] = 1
+        SEIR_simulated$day_E[n] <- current_day
+        SEIR_simulated$day_I[n] <- current_day + 9
+        SEIR_simulated$day_R[n] <- SEIR_simulated$day_I[n] + 1 + d + random_value
+        temp_E <- temp_E - 1
+    }
+    n <- n + 1
+    
+  }
+  
+  current_day <- current_day + 1
+  current_S <- sum(SEIR_simulated$S)
+  current_R <- sum(SEIR_simulated$R)
+  if(current_day > 99){
+    break
+  }
+}
+#print(simulation_index) #debugging
+simulation_results[[simulation_index]] <- SEIR_simulated
+
+}
+
+```
+
+## Simulation for complete model INFECTIOUS INDIVIDUALS
+```{r}
+
+plot_inf_list <- list()
+
+for (simulation_index in 1:1000) {
+
+SEIR_simulated <- simulation_results[[simulation_index]]
+
+plot_inf <- data.frame(day = integer(), no_I = integer(), stringsAsFactors = FALSE)
+max_day <- max(SEIR_simulated$day_I)
+
+for(i in 1:max_day){
+  
+  count_I <- 0
+  
+  for(CN in 1:187){
+    
+    if(i >= SEIR_simulated$day_I[CN] && i < SEIR_simulated$day_R[CN]){
+      count_I <- count_I + 1
+    }
+    
+  }
+  new_row <- data.frame(day = i, no_I = count_I)
+  plot_inf <- rbind(plot_inf, new_row)
+}
+plot_inf_list[[simulation_index]] <- plot_inf
+
+}
+
+```
+
+Plot for the infected children (simulated)
+```{r}
+library(ggplot2)
+
+combined_plot <- ggplot() + labs(title = "Number of Infectious Children", x = "Days", y = "Number of infectious children")
+
+for (i in 1:1001) {
+  if(i == 1001){
+    combined_plot <- combined_plot + 
+    geom_line(data = SEIR, aes(x = day, y = I, color = 'Actual'))
+  }
+  else{
+    combined_plot <- combined_plot +
+    geom_line(data = plot_inf_list[[i]], aes(x = day, y = no_I, color = 'Simulated'))
+  }
+}
+
+combined_plot <- combined_plot +
+                 labs(x = "Days", y = "Number of infectious children") +
+                 scale_color_manual(values = c("red", "blue"),
+                     labels = c("Actual", "Simulated"),
+                     name = "Category")
+
+print(combined_plot)
+```
+
+## Simulation for complete model SUSCEPTIBLE INDIVIDUALS
+```{r}
+
+plot_sus_list <- list()
+
+for (simulation_index in 1:1000) {
+
+SEIR_simulated <- simulation_results[[simulation_index]]
+
+plot_sus <- data.frame(day = integer(), no_S = integer(), stringsAsFactors = FALSE)
+max_day <- max(SEIR_simulated$day_R)
+
+for(i in 1:max_day){
+  
+  count_S <- 0
+  
+  for(CN in 1:187){
+    
+    if(i < SEIR_simulated$day_E[CN]){
+      count_S <- count_S + 1
+    }
+    
+  }
+  new_row <- data.frame(day = i, no_S = count_S)
+  plot_sus <- rbind(plot_sus, new_row)
+}
+plot_sus_list[[simulation_index]] <- plot_sus
+
+}
+
+```
+
+## Simulation for complete model SUSCEPTIBLE INDIVIDUALS
+```{r}
+library(ggplot2)
+
+combined_plot <- ggplot() + labs(title = "Number of Susceptible Children", x = "Days", y = "Number of Susceptible children")
+
+for (i in 1:1001) {
+  if(i == 1001){
+    combined_plot <- combined_plot + 
+    geom_line(data = SEIR, aes(x = day, y = S, color = 'Actual'))
+  }
+  else{
+    combined_plot <- combined_plot +
+    geom_line(data = plot_sus_list[[i]], aes(x = day, y = no_S, color = 'Simulated'))
+  }
+}
+
+combined_plot <- combined_plot +
+                 labs(x = "Days", y = "Number of infectious children") +
+                 scale_color_manual(values = c("red", "blue"),
+                     labels = c("Actual", "Simulated"),
+                     name = "Category")
+
+print(combined_plot)
+```
+
+#likelihood for CLASSROOM MODEL
+```{r}
+log_likelihood_function_classwise <- function(par, data) {
+  q <- par[1]
+  q_c <- par[2]
+  n <- max(data$day)
+  log_likelihood_CL0 <- numeric(n)
+  log_likelihood_CL1 <- numeric(n)
+  log_likelihood_CL2 <- numeric(n)
+  log_likelihood_all <- numeric(n)
+
+  for (x in 3:n) {
+    prev_I0 <- lag(data$I0)[x]
+    prev_I1 <- lag(data$I1)[x]
+    prev_I2 <- lag(data$I2)[x]
+    total_I <- prev_I0 + prev_I1 + prev_I2
+    prev_S0 <- lag(data$S0)[x]
+    prev_S1 <- lag(data$S1)[x]
+    prev_S2 <- lag(data$S2)[x]
+    delta_S0 <- prev_S0 - data$S0[x]
+    delta_S1 <- prev_S1 - data$S1[x]
+    delta_S2 <- prev_S2 - data$S2[x]
+    
+    total_S <- data$S0[x] + data$S1[x] + data$S2[x]
+    total_delta_S <- delta_S0 + delta_S1 + delta_S2
+    
+    if(delta_S0 > 0){
+          log_likelihood_CL0[x] <- (data$S0[x] * total_I) * log(q) + (delta_S0) * log(1 - (q ^ total_I))
+    }
+    else{
+       log_likelihood_CL0[x] <- 0
+    }
+    if(delta_S1 >0 && prev_I1 > 0){
+          log_likelihood_CL1[x] <- (data$S1[x] ) * log((q_c ^ prev_I1 ) * (q ^ (prev_I0 + prev_I2))) + (delta_S1) * log(1 - ((q_c ^ prev_I1 ) * (q ^ (prev_I0 + prev_I2))))
+    }
+    if(delta_S2 >0 && prev_I2 > 0){
+          log_likelihood_CL2[x] <- (data$S2[x] ) * log((q_c ^ prev_I2 ) * (q ^ (prev_I0 + prev_I1))) + (delta_S2) * log(1 - ((q_c ^ prev_I2 ) * (q ^ (prev_I0 + prev_I1))))
+    }
+    
+    log_likelihood_all[x] <- log_likelihood_CL0[x] + log_likelihood_CL1[x] + log_likelihood_CL2[x]
+    
+    }
+  
+  total_log_likelihood <- sum(log_likelihood_all)
+  return(-total_log_likelihood) 
+}
+
+```
+
+```{r}
+
+init_q_classwise <- c(0.1, 0.1)
+
+result_classwise <- optim(par = init_q_classwise, fn = log_likelihood_function_classwise,  data = SEIR_classwise)
+
+q_final_classwise <- result_classwise$par
+
+```
+
+Values of q and q_c
+```{r}
+paste("Total:", q_final_classwise)
+```
+
+CLASSROOM MODEL SIMULATION
+```{r}
+set.seed(123)
+simulation_results_classroom <- list()
+
+for (simulation_index in 1:1000) {
+  
+  temp_pr <- unique_values_pr
+
+SEIR_classwise_simulated <- data.frame(CN = integer(), CL = integer(), S = integer(), E = integer(), I = integer(), R = integer(), day_E = integer(), day_I = integer(), day_R = integer(), stringsAsFactors = FALSE)
+
+CL <- 1
+for (CN in 1:30) {
+  S <- 1
+  E <- 0
+  I <- 0
+  R <- 0
+  day_E <- 0
+  day_I <- 0
+  day_R <- 0
+  
+  new_row <- data.frame(CN, CL, S, E, I, R, day_E, day_I, day_R)
+  SEIR_classwise_simulated <- rbind(SEIR_classwise_simulated, new_row)
+}
+
+CL <- 0
+for (CN in 31:119) {
+  S <- 1
+  E <- 0
+  I <- 0
+  R <- 0
+  day_E <- 0
+  day_I <- 0
+  day_R <- 0
+  
+  new_row <- data.frame(CN, CL, S, E, I, R, day_E, day_I, day_R)
+  SEIR_classwise_simulated <- rbind(SEIR_classwise_simulated, new_row)
+}
+
+CL <- 2
+for (CN in 120:187) {
+  S <- ifelse(CN == 120, 0, 1)
+  E <- ifelse(CN == 120, 0, 0)
+  I <- ifelse(CN == 120, 1, 0)
+  R <- 0
+  day_E <- ifelse(CN == 120, 0, 0)
+  day_I <- ifelse(CN == 120, 1, 0)
+  day_R <- ifelse(CN == 120, 8, 0)
+  
+  new_row <- data.frame(CN, CL, S, E, I, R, day_E, day_I, day_R)
+  SEIR_classwise_simulated <- rbind(SEIR_classwise_simulated, new_row)
+}
+  
+  
+
+current_day <- 2
+current_R <- sum(SEIR_classwise_simulated$R)
+
+q <- q_final_classwise[1]
+q_c <- q_final_classwise[2]
+
+  SEIR_classwise_simulated_CL0 <- subset(SEIR_classwise_simulated, CL == 0)
+  SEIR_classwise_simulated_CL1 <- subset(SEIR_classwise_simulated, CL == 1)
+  SEIR_classwise_simulated_CL2 <- subset(SEIR_classwise_simulated, CL == 2)
+
+while (current_R != 187) {
+  
+
+  
+  for(i in 1:89){
+    
+    if(current_day >= SEIR_classwise_simulated_CL0$day_I[i] && current_day < SEIR_classwise_simulated_CL0$day_R[i] && SEIR_classwise_simulated_CL0$E[i] == 1){
+      SEIR_classwise_simulated_CL0$E[i] = 0
+      SEIR_classwise_simulated_CL0$I[i] = 1
+    }
+    
+    else if(current_day >= SEIR_classwise_simulated_CL0$day_R[i] && SEIR_classwise_simulated_CL0$I[i] == 1){
+      SEIR_classwise_simulated_CL0$I[i] = 0
+      SEIR_classwise_simulated_CL0$R[i] = 1
+    }
+  }
+  
+  for(i in 1:30){
+    
+    if(current_day >= SEIR_classwise_simulated_CL1$day_I[i] && current_day < SEIR_classwise_simulated_CL1$day_R[i] && SEIR_classwise_simulated_CL1$E[i] == 1){
+      SEIR_classwise_simulated_CL1$E[i] = 0
+      SEIR_classwise_simulated_CL1$I[i] = 1
+    }
+    
+    else if(current_day >= SEIR_classwise_simulated_CL1$day_R[i] && SEIR_classwise_simulated_CL1$I[i] == 1){
+      SEIR_classwise_simulated_CL1$I[i] = 0
+      SEIR_classwise_simulated_CL1$R[i] = 1
+    }
+  }
+  
+  for(i in 1:68){
+    
+    if(current_day >= SEIR_classwise_simulated_CL2$day_I[i] && current_day < SEIR_classwise_simulated_CL2$day_R[i] && SEIR_classwise_simulated_CL2$E[i] == 1){
+      SEIR_classwise_simulated_CL2$E[i] = 0
+      SEIR_classwise_simulated_CL2$I[i] = 1
+    }
+    
+    else if(current_day >= SEIR_classwise_simulated_CL2$day_R[i] && SEIR_classwise_simulated_CL2$I[i] == 1){
+      SEIR_classwise_simulated_CL2$I[i] = 0
+      SEIR_classwise_simulated_CL2$R[i] = 1
+    }
+  }
+  
+  
+  prev_I_CL0 <- sum(SEIR_classwise_simulated_CL0$I)
+  prev_I_CL1 <- sum(SEIR_classwise_simulated_CL1$I)
+  prev_I_CL2 <- sum(SEIR_classwise_simulated_CL2$I)
+  
+  prev_S_CL0 <- sum(SEIR_classwise_simulated_CL0$S)
+  prev_S_CL1 <- sum(SEIR_classwise_simulated_CL1$S)
+  prev_S_CL2 <- sum(SEIR_classwise_simulated_CL2$S)
+  
+  total_I <- prev_I_CL0 + prev_I_CL1 + prev_I_CL2
+  
+  #simulating new infected results for the classwise model
+  new_E_CL0 <- rbinom(1, prev_S_CL0, (1- q^total_I))
+  new_E_CL1 <- rbinom(1, prev_S_CL1, (1- (q_c^prev_I_CL1)*(q ^ (prev_I_CL0 + prev_I_CL2))))
+  new_E_CL2 <- rbinom(1, prev_S_CL2, (1- (q_c^prev_I_CL2)*(q ^ (prev_I_CL0 + prev_I_CL1))))
+  
+  temp_E_CL0 <- new_E_CL0
+  temp_E_CL1 <- new_E_CL1
+  temp_E_CL2 <- new_E_CL2
+  
+  n_CL0 <- 1
+  n_CL1 <- 1
+  n_CL2 <- 1
+  
+  while(temp_E_CL0 > 0 ){
+    if(SEIR_classwise_simulated_CL0$S[n_CL0] == 1){
+      
+        random_index <- sample(length(temp_pr), size = 1)
+        random_value <- temp_pr[random_index]
+        temp_pr <- temp_pr[-random_index]
+        d <- 3
+      
+        SEIR_classwise_simulated_CL0$S[n_CL0] = 0
+        SEIR_classwise_simulated_CL0$E[n_CL0] = 1
+        SEIR_classwise_simulated_CL0$day_E[n_CL0] <- current_day
+        SEIR_classwise_simulated_CL0$day_I[n_CL0] <- current_day + 9
+        SEIR_classwise_simulated_CL0$day_R[n_CL0] <- SEIR_classwise_simulated_CL0$day_I[n_CL0] + 1 + d + random_value
+        temp_E_CL0 <- temp_E_CL0 - 1
+    }
+    n_CL0 <- n_CL0 + 1
+    
+  }
+  
+  
+  while(temp_E_CL1 > 0 ){
+    if(SEIR_classwise_simulated_CL1$S[n_CL1] == 1){
+      
+        random_index <- sample(length(temp_pr), size = 1)
+        random_value <- temp_pr[random_index]
+        temp_pr <- temp_pr[-random_index]
+        d <- 3
+        
+        SEIR_classwise_simulated_CL1$S[n_CL1] = 0
+        SEIR_classwise_simulated_CL1$E[n_CL1] = 1
+        SEIR_classwise_simulated_CL1$day_E[n_CL1] <- current_day
+        SEIR_classwise_simulated_CL1$day_I[n_CL1] <- current_day + 9
+        SEIR_classwise_simulated_CL1$day_R[n_CL1] <- SEIR_classwise_simulated_CL1$day_I[n_CL1] + 1 + d + random_value
+        temp_E_CL1 <- temp_E_CL1 - 1
+    }
+    n_CL1 <- n_CL1 + 1
+    
+  }
+  
+  while(temp_E_CL2 > 0 ){
+    if(SEIR_classwise_simulated_CL2$S[n_CL2] == 1){
+        
+        random_index <- sample(length(temp_pr), size = 1)
+        random_value <- temp_pr[random_index]
+        temp_pr <- temp_pr[-random_index]
+        d <- 3
+        
+        SEIR_classwise_simulated_CL2$S[n_CL2] = 0
+        SEIR_classwise_simulated_CL2$E[n_CL2] = 1
+        SEIR_classwise_simulated_CL2$day_E[n_CL2] <- current_day
+        SEIR_classwise_simulated_CL2$day_I[n_CL2] <- current_day + 9
+        SEIR_classwise_simulated_CL2$day_R[n_CL2] <- SEIR_classwise_simulated_CL2$day_I[n_CL2] + 1 + d + random_value
+        temp_E_CL2 <- temp_E_CL2 - 1
+    }
+    n_CL2 <- n_CL2 + 1
+    
+  }
+  
+  current_day <- current_day + 1
+  
+  current_R <- sum(SEIR_classwise_simulated_CL0$R) + sum(SEIR_classwise_simulated_CL1$R) + sum(SEIR_classwise_simulated_CL2$R)
+  
+  if(current_day > 99){
+    break
+  }
+}
+
+  SEIR_classwise_simulated <- rbind(
+  SEIR_classwise_simulated_CL1,
+  SEIR_classwise_simulated_CL0,
+  SEIR_classwise_simulated_CL2
+)
+  #print(simulation_index) #debugging
+ simulation_results_classroom[[simulation_index]] <- SEIR_classwise_simulated
+
+} 
+  
+```
+
+CLASSROOM MODEL INFECTED SIMULATION DATA
+```{r}
+
+plot_inf_classroom_list <- list()
+
+for (simulation_index in 1:1000) {
+  
+  SEIR_classwise_simulated <- simulation_results_classroom[[simulation_index]]
+  
+  
+  SEIR_classwise_simulated_CL0 <- subset(SEIR_classwise_simulated, CL == 0)
+  SEIR_classwise_simulated_CL1 <- subset(SEIR_classwise_simulated, CL == 1)
+  SEIR_classwise_simulated_CL2 <- subset(SEIR_classwise_simulated, CL == 2)
+
+plot_classwise_inf <- data.frame(day = integer(), no_I_CL0 = integer(), no_I_CL1 = integer(), no_I_CL2 = integer(), stringsAsFactors = FALSE)
+
+max_day_CL0 <- max(SEIR_classwise_simulated_CL0$day_R)
+max_day_CL1 <- max(SEIR_classwise_simulated_CL1$day_R)
+max_day_CL2 <- max(SEIR_classwise_simulated_CL2$day_R)
+
+max_day <- max(max_day_CL0, max_day_CL1, max_day_CL2)
+
+for(i in 1:max_day){
+  
+  count_I_CL0 <- 0
+  count_I_CL1 <- 0
+  count_I_CL2 <- 0
+  
+  for(CN in 1:89){
+    
+    if(i >= SEIR_classwise_simulated_CL0$day_I[CN] && i < SEIR_classwise_simulated_CL0$day_R[CN]){
+      count_I_CL0 <- count_I_CL0 + 1
+    }
+  }
+  for(CN in 1:30){
+    
+    if(i >= SEIR_classwise_simulated_CL1$day_I[CN] && i < SEIR_classwise_simulated_CL1$day_R[CN]){
+      count_I_CL1 <- count_I_CL1 + 1
+    }
+  }
+  for(CN in 1:68){
+    
+    if(i >= SEIR_classwise_simulated_CL2$day_I[CN] && i < SEIR_classwise_simulated_CL2$day_R[CN]){
+      count_I_CL2 <- count_I_CL2 + 1
+    }
+  }
+  
+  new_row <- data.frame(day = i, no_I_CL0 = count_I_CL0, no_I_CL1 = count_I_CL1,  no_I_CL2 = count_I_CL2)
+  plot_classwise_inf <- rbind(plot_classwise_inf, new_row)
+}
+
+#print(simulation_index) #debugging
+plot_inf_classroom_list[[simulation_index]] <- plot_classwise_inf
+}
+```
+
+Plot for the infected children (simulated) for CL0
+```{r}
+library(ggplot2)
+
+combined_plot_classwise_CL0_I <- ggplot() + labs(title = "Number of Infected Children in CL=0", x = "Days", y = "Number of infectious children")
+
+for (i in 1:1001) {
+  if(i == 1001){
+    combined_plot_classwise_CL0_I <- combined_plot_classwise_CL0_I + 
+    geom_line(data = SEIR_classwise, aes(x = day, y = I0, color = 'Actual'))
+  }
+  else{
+    combined_plot_classwise_CL0_I <- combined_plot_classwise_CL0_I +
+    geom_line(data = plot_inf_classroom_list[[i]], aes(x = day, y = no_I_CL0, color = 'Simulated'))
+  }
+}
+
+combined_plot_classwise_CL0_I <- combined_plot_classwise_CL0_I +
+                 labs(x = "Days", y = "Number of infectious children in CL=0") +
+                 scale_color_manual(values = c("red", "blue"),
+                     labels = c("Actual", "Simulated"),
+                     name = "Category")
+
+print(combined_plot_classwise_CL0_I)
+```
+
+Plot for the infected children (simulated) for CL1
+```{r}
+library(ggplot2)
+
+combined_plot_classwise_CL1_I <- ggplot() + labs(title = "Number of Infected Children in CL=1", x = "Days", y = "Number of infectious children")
+
+for (i in 1:1001) {
+  if(i == 1001){
+    combined_plot_classwise_CL1_I <- combined_plot_classwise_CL1_I + 
+    geom_line(data = SEIR_classwise, aes(x = day, y = I1, color = 'Actual'))
+  }
+  else{
+    combined_plot_classwise_CL1_I <- combined_plot_classwise_CL1_I +
+    geom_line(data = plot_inf_classroom_list[[i]], aes(x = day, y = no_I_CL1, color = 'Simulated'))
+  }
+}
+
+combined_plot_classwise_CL1_I <- combined_plot_classwise_CL1_I +
+                 labs(x = "Days", y = "Number of infectious children in CL=1") +
+                 scale_color_manual(values = c("red", "blue"),
+                     labels = c("Actual", "Simulated"),
+                     name = "Category")
+
+print(combined_plot_classwise_CL1_I)
+```
+
+Plot for the infected children (simulated) for CL2
+```{r}
+library(ggplot2)
+
+combined_plot_classwise_CL2_I <- ggplot() + labs(title = "Number of Infected Children in CL=2", x = "Days", y = "Number of infectious children")
+
+for (i in 1:1001) {
+  if(i == 1001){
+    combined_plot_classwise_CL2_I <- combined_plot_classwise_CL2_I + 
+    geom_line(data = SEIR_classwise, aes(x = day, y = I2, color = 'Actual'))
+  }
+  else{
+    combined_plot_classwise_CL2_I <- combined_plot_classwise_CL2_I +
+    geom_line(data = plot_inf_classroom_list[[i]], aes(x = day, y = no_I_CL2, color = 'Simulated'))
+  }
+}
+
+combined_plot_classwise_CL2_I <- combined_plot_classwise_CL2_I +
+                 labs(x = "Days", y = "Number of infectious children in CL=2") +
+                 scale_color_manual(values = c("red", "blue"),
+                     labels = c("Actual", "Simulated"),
+                     name = "Category")
+
+print(combined_plot_classwise_CL2_I)
+```
+
