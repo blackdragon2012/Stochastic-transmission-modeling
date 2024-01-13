@@ -17,3 +17,5 @@ transmission model for the spread of the disease among children.
 
 ▪ Presented the research findings through a comprehensive IEEE report, encompassing literature reviews, defined objectives and diverse
 analytic components.
+
+> Part of my research project (MSc Data Science)
